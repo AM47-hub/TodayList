@@ -73,7 +73,7 @@ def process():
 
         if not raw: 
             return make_response(json.dumps([]), 200)
-            
+
         notes = [s.strip() for s in raw.split('|') if 'Content:' in s]
         bkd_groups = {}
         fnd_groups = {}
@@ -110,17 +110,35 @@ def process():
 
                     tokens = fast_parse(body)
                     
+                    # 1. GLOBAL REPAIRS FIRST
                     for key in tokens:
                         val = tokens[key]
                         for word, digit in repairs.items():
                             val = re.sub(rf'\b{word}\b', digit, val, flags=re.I)
                         tokens[key] = val
+                    
+                    # 2. UNIVERSAL TIME PARSING (After repairs)
+                    time_val = "TBA"
+                    sort_val = "23:59"
+                    raw_Frm = tokens.get('from', '')
+                    if raw_Frm:
+                        try:
+                            # Standardizing format for strptime
+                            clean_Frm = raw_Frm.replace(".", ":").upper()
+                            if ":" not in clean_Frm:
+                                clean_Frm = re.sub(r'(\d+)', r'\1:00', clean_Frm)
+                            time_obj = datetime.strptime(clean_Frm, "%I:%M %p")
+                            time_val = time_obj.strftime("%-I:%M %p")
+                            sort_val = time_obj.strftime("%H:%M")
+                        except:
+                            pass
 
                     delimit_addr = quick_addr(tokens)
                     view_string = tokens.get('viewing', '').lower()
 
                     view_date = None
                     
+                    # Date Logic
                     date_actual = re.search(r'(\d{1,2})[/-](\d{1,2})', view_string)
                     if date_actual: 
                         v_day = int(date_actual.group(1))
@@ -154,32 +172,30 @@ def process():
 
                     if view_date and view_date == status_dt:
                         day_flag = "TODAY"
-
                     else:
                         day_flag = "UNKNOWN"
-                        
+
                     appoint = "must book" in view_string
                     
+                    # 3. SOURCE ROUTING (Now both have vflag and Time data)
                     if "2Booked" in source:
-                        raw_Frm = tokens.get('from', '')
-
-                        if raw_Frm:
-                            time_Frm = datetime.strptime(raw_Frm, "%I:%M %p")
-
-                            bkd_fields = {
-                                "From": time_Frm.strftime("%-I:%M %p"), 
-                                "vflag": day_flag, 
-                                "SortTime": time_Frm.strftime("%H:%M")
-                            }
-                            if delimit_addr not in bkd_groups:
-                                bkd_groups[delimit_addr] = []
-                            bkd_groups[delimit_addr].append(bkd_fields)
+                        bkd_fields = {
+                            "From": time_val, 
+                            "vflag": day_flag, 
+                            "SortTime": sort_val
+                        }
+                        if delimit_addr not in bkd_groups:
+                            bkd_groups[delimit_addr] = []
+                        bkd_groups[delimit_addr].append(bkd_fields)
                     else:
                         fnd_fields = {
                             "rent": tokens.get('rent', ''), 
                             "agency": tokens.get('agency', ''), 
                             "mobile": tokens.get('mobile', ''), 
-                            "TBC": appoint
+                            "TBC": appoint,
+                            "vflag": day_flag,      # New for standalone logic
+                            "From": time_val, # New for standalone logic
+                            "SortTime": sort_val    # New for standalone logic
                         }
                         if delimit_addr not in fnd_groups:
                             fnd_groups[delimit_addr] = []
@@ -188,9 +204,11 @@ def process():
                 continue
 
         results = []
+        # First Pass: Process Bookings (Match with Found if possible)
         for addr_key in bkd_groups:
             bkd_list = bkd_groups[addr_key]
 
+            # 1. Identify if we have a matching 'Found' entry for this address
             fnd_val = None
             if addr_key in fnd_groups:
                 fnd_list = fnd_groups[addr_key]
@@ -205,30 +223,33 @@ def process():
 
                 if match_flag:
                     fnd_val = match_flag[0]
-            
+
             for bkd_val in bkd_list:
 
                 if bkd_val.get('vflag') == "TODAY":
-                    if fnd_val:
 
+                    results.append({
+                        "From": bkd_val["From"],
+                        "Address": addr_key,
+                        "Rent": fnd_val.get("rent", "not found?") if fnd_val else "not found?",
+                        "Agency": fnd_val.get("agency", "not found?") if fnd_val else "not found?",
+                        "Mobile": fnd_val.get("mobile", "not found?") if fnd_val else "not found?",
+                        "SortTime": bkd_val["SortTime"]
+                    })
+
+        # Second Pass: 'Found' notes for TODAY
+        addr_Fnd = [res["Address"] for res in results]
+        for addr_key, fnd_list in fnd_groups.items():
+            if addr_key not in addr_Fnd:
+                for fnd_val in fnd_list:
+                    if fnd_val.get("vflag") == "TODAY":
                         results.append({
-                            "From": bkd_val["From"],
+                            "From": fnd_val["From"],
                             "Address": addr_key,
                             "Rent": fnd_val.get("rent", ""),
                             "Agency": fnd_val.get("agency", ""),
                             "Mobile": fnd_val.get("mobile", ""),
-                            "SortTime": bkd_val["SortTime"]
-                        })
-
-                    else:
-
-                        results.append({
-                            "From": bkd_val["From"],
-                            "Address": addr_key,
-                            "Rent": "not found?",
-                            "Agency": "not found?",
-                            "Mobile": "not found?",
-                            "SortTime": bkd_val["SortTime"]
+                            "SortTime": fnd_val["SortTime"]
                         })
 
         results.sort(key=lambda x: x["SortTime"])
